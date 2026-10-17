@@ -1,0 +1,53 @@
+[
+  {
+    "id": "tam-quoc-hoi-tuong",
+    "title": "Tam Quốc: hỏi một vị tướng (tên Hán Việt, xưng hô, ngôi kể)",
+    "expectLoot": false,
+    "profile": {
+      "name": "Lý Tiềm",
+      "age": "22",
+      "identity": "Thư sinh lưu lạc, biết chút y thuật, vừa được nhận vào doanh trại làm thư lại",
+      "setting": "Tam Quốc năm 208, Kinh Châu trước trận Xích Bích. Thế giới có tu luyện ẩn mật nhưng người thường không biết. Giữ đúng nhân vật và sự kiện lịch sử.",
+      "goal": "Được một minh chủ tin dùng, dần nắm quyền trong quân",
+      "realm": "Khai Mạch",
+      "nsfw": true,
+      "worldName": "Tam Quốc năm 208"
+    },
+    "recentStory": "Trời Kinh Châu cuối thu se lạnh, ngươi ôm chồng sổ sách bước qua sân doanh trại, mùi khói bếp lẫn mùi ngựa phả vào mặt. Trước trướng chủ soái, một người đàn ông cao lớn, râu dài tới ngực, mặt đỏ như táo chín đang đứng khoanh tay nhìn ra bờ sông; đó là **Quan Vũ**. Hắn quay lại, mắt phượng khép hờ.\n\n<dialogue speaker=\"Quan Vũ\">Ngươi là thư lại mới tới? Chủ công đang bận bàn việc quân, có gì cứ nói với ta.</dialogue>\n\nNgươi cúi đầu hành lễ, trong lòng thầm tính xem nên mở lời thế nào.",
+    "action": "Ta cúi đầu chắp tay, giữ giọng khiêm nhường rồi hỏi về tình hình quân Tào ở phía bắc sông.\nLý Tiềm nói: “Tại hạ nghe nói quân Tào đã tới Giang Lăng, không biết tướng quân định phòng thủ thế nào?”"
+  },
+  {
+    "id": "tu-tien-yeu-thu",
+    "title": "Tu tiên: giao chiến với yêu thú không có kịch bản (luật giao chiến, dòng chiến lợi phẩm)",
+    "expectLoot": true,
+    "profile": {
+      "name": "Hàn Lập",
+      "age": "19",
+      "identity": "Đệ tử ngoại môn Thanh Vân Tông, xuất thân nông gia",
+      "setting": "Huyền Thiên đại lục, thế giới tu tiên tự tạo: tông môn, linh khí, bí cảnh, yêu thú. Cảnh giới: Luyện Khí, Trúc Cơ, Kim Đan.",
+      "goal": "Tìm đủ linh thảo để đột phá Trúc Cơ trước kỳ khảo hạch",
+      "realm": "Luyện Khí tầng ba",
+      "nsfw": true,
+      "worldName": "Huyền Thiên đại lục"
+    },
+    "recentStory": "Rừng Hắc Trúc về chiều âm u, ngươi men theo khe suối tìm bóng dáng cây **Tử Linh Thảo**. Lá khô xào xạc sau lưng. Một con sói lông xám tro, mắt vàng lạnh, to gần bằng con bê, từ bụi rậm bước ra chắn giữa lối, nanh nhe trắng hếu; ngươi nhận ra đó là **Hôi Lang**, loài yêu thú thường quanh quẩn ở bìa rừng.\n\nNgươi lùi nửa bước, tay siết chặt chuôi **Thanh Phong Kiếm**. Con sói gầm khẽ, hai chân sau hạ thấp.",
+    "action": "Ta rút kiếm, vận Thanh Phong Kiếm Pháp, nhắm vào cổ con sói mà chém tới, quyết hạ nó để lấy đường đi tiếp."
+  },
+  {
+    "id": "tong-mon-tinh-cam",
+    "title": "Tông môn: trò chuyện với sư tỷ (chàng/nàng, cặp xưng hô, hảo cảm)",
+    "expectLoot": false,
+    "profile": {
+      "name": "Tô Mặc",
+      "age": "24",
+      "identity": "Đệ tử nội môn Lưu Vân Tông, tính trầm lặng, giỏi luyện đan",
+      "setting": "Thế giới tu tiên tự tạo, Lưu Vân Tông nằm trên núi Thanh Lĩnh. Nhịp truyện chậm, nhiều đối thoại và tình cảm, ít chiến đấu.",
+      "goal": "Chiếm được lòng tin của sư tỷ Lăng Vân để được truyền đan phương bí truyền",
+      "realm": "Trúc Cơ sơ kỳ",
+      "nsfw": true,
+      "worldName": "Lưu Vân Tông"
+    },
+    "recentStory": "Đan phòng về khuya chỉ còn ánh lửa lò hồng hồng. **Lăng Vân** ngồi bên bàn, tay chống má, mắt dõi theo làn khói mỏng bốc lên từ lò đan; nàng là sư tỷ hơn ngươi ba tuổi, nổi tiếng nghiêm khắc với đệ tử mới.\n\n<dialogue speaker=\"Lăng Vân\">Đệ còn chưa đi nghỉ? Lò này phải canh tới sáng, một mình ta là đủ.</dialogue>\n\nNgươi đặt ấm trà nóng lên bàn, ngồi xuống đối diện nàng.",
+    "action": "Ta rót trà cho sư tỷ, nói là muốn ở lại canh lò cùng nàng vì lo nàng mệt.\nTô Mặc nói: “Sư tỷ đã thức hai đêm rồi, để đệ canh một lát, tỷ chợp mắt đi.”"
+  }
+]

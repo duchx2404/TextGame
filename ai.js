@@ -1,9 +1,30 @@
 (() => {
   const OLLAMA_URL = 'http://127.0.0.1:11434';
   // One context size for every call: Ollama reloads the model whenever num_ctx changes between requests.
-  // 8192 keeps the full rule set, chapter history and NPC profiles in view; its KV cache (~1.3 GB for a 14B
-  // model) still fits beside the weights on a 12 GB GPU.
-  const OLLAMA_NUM_CTX = 8192;
+  // The rules alone cost about 5,000 tokens on Qwen3 and a turn's answer another ~3,000, so 8192 cannot hold
+  // the story context as well and Ollama silently truncates. 12288 is the default (a 14B Q4 model then
+  // offloads ~7% to the CPU on a 12 GB GPU; OLLAMA_KV_CACHE_TYPE=q8_0 with OLLAMA_FLASH_ATTENTION=1 keeps it
+  // fully on the GPU). The player can pick 8192, 12288 or 16384 in the settings panel.
+  const NUM_CTX_KEY = 'van-gioi-ky.num-ctx.v1';
+  const NUM_CTX_CHOICES = [8192, 12288, 16384];
+  const DEFAULT_NUM_CTX = 12288;
+  let OLLAMA_NUM_CTX = (() => {
+    const saved = Number(localStorage.getItem(NUM_CTX_KEY));
+    return NUM_CTX_CHOICES.includes(saved) ? saved : DEFAULT_NUM_CTX;
+  })();
+  // Prompt budget: Qwen3 spends ~3.4 tokens per 10 Vietnamese characters on this prompt; 3.1 keeps a margin.
+  // The answer needs room too (1,500–2,000 words ≈ 3,000 tokens). When the rules plus the story context
+  // would not fit, the story context is trimmed in these steps; the rules are never trimmed.
+  const CHARS_PER_TOKEN = 3.1;
+  const OUTPUT_RESERVE_TOKENS = 3200;
+  const CONTEXT_BUDGETS = [
+    { recentChars: 5600, latestChars: 3200, memoryChars: 4000 },
+    { recentChars: 4200, latestChars: 2400, memoryChars: 2000 },
+    { recentChars: 3000, latestChars: 1600, memoryChars: 1200 },
+    { recentChars: 2000, latestChars: 1000, memoryChars: 800 },
+    { recentChars: 1200, latestChars: 600, memoryChars: 500 }
+  ];
+  const estimateTokens = text => Math.ceil(String(text || '').length / CHARS_PER_TOKEN);
   const modelInput = document.querySelector('#ai-model');
   const status = document.querySelector('#ai-status');
   const help = document.querySelector('#ai-help');
@@ -190,20 +211,44 @@
     renderJourney();
   };
 
-  function formatChapterMemory() {
+  // A paragraph or speech line the player rewrote in the story (language-feedback.js) is rewritten in the saved
+  // turn too. The rendered text has no ** marks, so the match is tried on the raw narrative first and then on a
+  // copy without them; bold marks are only presentation and are not needed in prompt history.
+  window.applyStoryCorrection = (before, after) => {
+    const squeeze = value => String(value || '').replace(/\s+/g, ' ').trim();
+    before = squeeze(before);
+    after = squeeze(after);
+    if (!before || before === after) return false;
+    for (let index = chapterState.turns.length - 1; index >= 0; index--) {
+      const turn = chapterState.turns[index];
+      if (turn.narrative.includes(before)) {
+        turn.narrative = turn.narrative.split(before).join(after);
+      } else {
+        const plain = turn.narrative.replace(/\*\*/g, '');
+        if (!plain.includes(before)) continue;
+        turn.narrative = plain.split(before).join(after);
+      }
+      saveChapterState();
+      return true;
+    }
+    return false;
+  };
+
+  function formatChapterMemory(maxChars = 4000) {
     if (!chapterState.memories.length) return 'Chưa có chương hoàn tất nào trong bộ nhớ.';
+    const clip = text => text.length > maxChars ? `${text.slice(0, maxChars - 1).trimEnd()}…` : text;
     return chapterState.memories.slice(-MAX_REMEMBERED_CHAPTERS)
-      .map(chapter => `CHƯƠNG ${String(chapter.number).padStart(2, '0')}: ${chapter.summary}`)
+      .map(chapter => `CHƯƠNG ${String(chapter.number).padStart(2, '0')}: ${clip(chapter.summary)}`)
       .join('\n\n');
   }
 
-  function formatCurrentChapterContext() {
+  function formatCurrentChapterContext(latestChars = 3200) {
     if (!chapterState.turns.length) return 'Chưa có lượt nào khác trong chương hiện tại.';
     return chapterState.turns.map((turn, index) => {
       const paragraphs = turn.narrative.split(/\n\s*\n/).map(part => part.trim()).filter(Boolean);
       const latestTurn = index === chapterState.turns.length - 1;
       const excerpts = latestTurn
-        ? [turn.narrative.slice(-3200)]
+        ? [turn.narrative.slice(-latestChars)]
         : [...paragraphs.slice(0, 1).map(value => value.slice(0, 300)), ...paragraphs.slice(-1).map(value => value.slice(-500))];
       return `LƯỢT ${index + 1} — HÀNH ĐỘNG NGƯỜI CHƠI: ${turn.action}\nDIỄN BIẾN VÀ KẾT QUẢ ĐÃ XẢY RA: ${[...new Set(excerpts)].join('\n')}`;
     }).join('\n\n');
@@ -352,10 +397,6 @@
     };
   }
 
-  function worldDirective(profile) {
-    return `THẾ GIỚI NGƯỜI CHƠI MUỐN TRẢI NGHIỆM: ${profile.setting || 'chưa mô tả'}. Đây có thể là một bộ truyện/tiểu thuyết nổi tiếng, một giai đoạn lịch sử hoặc một thế giới hoàn toàn mới. Nếu nhận ra tác phẩm, hãy dùng đúng hệ thống sức mạnh, phe phái, địa lý, nhân vật và mốc truyện phù hợp với mô tả; nếu là lịch sử, tôn trọng thời đại, địa danh, thiết chế và sự kiện đã biết, không đưa yếu tố hiện đại sai thời kỳ. Phần nhập của người chơi quyết định thời điểm, địa điểm và các thay đổi so với nguyên tác. Nếu không nhận biết chắc hoặc thiếu dữ kiện, đừng bịa chi tiết canon/lịch sử như sự thật; hãy tạo tuyến nhân vật và sự kiện phụ hợp lý trong khung đã nêu. Nếu là thế giới tự tạo, coi các quy tắc người chơi mô tả là luật nền, suy ra nhất quán phe phái, tài nguyên, sức mạnh, hiểm họa và cơ hội. Trong mọi kiểu thế giới, mỗi lượt cần có diễn biến mới phù hợp hành động và bối cảnh; không trộn cơ chế từ tác phẩm/thời đại khác, không viết lại nguyên tác, và không tước quyền lựa chọn của nhân vật người chơi.`;
-  }
-
   // The player's input cards, in the order they were written: narration or a line of dialogue.
   function getPlayerEntries() {
     return [...inputs.querySelectorAll('.input-card')].flatMap(card => {
@@ -425,13 +466,6 @@
     ].join('\n');
   }
 
-  function adultIntimacyRule(profile) {
-    if (!(profile.nsfw || profile.allowNsfw)) return 'Nội dung tình cảm giữ ở mức phù hợp lứa tuổi, không miêu tả tình dục.';
-    const age = Number.parseInt(profile.age, 10);
-    if (!Number.isFinite(age) || age < 18) return 'CẤM nội dung tình dục hoặc gợi dục: nhân vật chính chưa đủ 18 tuổi hoặc tuổi không xác định. Chỉ kể tình bạn, tình cảm trong sáng và phi tình dục.';
-    return 'Có thể khai thác tình cảm và sự thân mật trưởng thành ở mức gợi cảm, không đồ họa khi mạch truyện phù hợp. Chỉ giữa các nhân vật được xác định rõ đều từ 18 tuổi trở lên, có sự đồng thuận rõ ràng và có thể rút lại; không tình dục hóa người chưa thành niên hoặc người không rõ tuổi, không ép buộc, bạo lực tình dục hay quan hệ quyền lực thiếu đồng thuận. Nếu tuổi hoặc sự đồng thuận chưa rõ, giữ nội dung phi tình dục.';
-  }
-
   function setHelpForError(error) {
     const remotePage = location.protocol === 'https:' && !['localhost', '127.0.0.1'].includes(location.hostname);
     const detail = error?.name === 'AbortError' ? 'Ollama chưa phản hồi kịp thời.' : 'Ollama chưa chạy hoặc trình duyệt chưa được phép kết nối tới máy cục bộ.';
@@ -466,7 +500,7 @@
         return false;
       }
       setStatus('ready');
-      help.textContent = `Đã kết nối ${modelName}. Yêu cầu AI được gửi tới Ollama local.`;
+      help.textContent = `Đã kết nối ${modelName}. Yêu cầu AI được gửi tới Ollama local với ngữ cảnh ${OLLAMA_NUM_CTX} token.`;
       return true;
     } catch (error) {
       setStatus('error');
@@ -888,28 +922,6 @@
     }
   }
 
-  function narrationPerspectiveRule(profile) {
-    return `NGÔI KỂ THỐNG NHẤT: Toàn bộ lời dẫn truyện dùng ngôi thứ hai, gọi nhân vật người chơi là "ngươi". Nhân vật người chơi là ${profile.name}. Khi kể hành động, cảm giác, vị trí hoặc sở hữu của nhân vật này, dùng "ngươi", "của ngươi", "trước mặt ngươi"; không gọi bằng tên riêng hoặc "hắn", "cậu ấy", "anh ấy", "cậu ta", "chàng" và không chuyển sang "tôi", "ta" hay "bạn" trong lời dẫn. Ví dụ: "Ngươi đứng bên cầu. Hơi thở của ngươi chậm lại. Người đàn ông nhìn thẳng vào ngươi." NPC vẫn được kể bằng tên hoặc đại từ phù hợp. Chỉ áp dụng quy tắc này cho lời dẫn: lời thoại giữ cách xưng hô tự nhiên của người nói, thuộc tính speaker vẫn dùng tên thật (${profile.name} cho người chơi). Không thay tên NPC hay lời thoại bằng "ngươi". Dù lịch sử truyện, bản tóm tắt hoặc hành động nhập vào dùng ngôi khác, phần truyện mới vẫn phải dùng ngôi thứ hai. Trước khi trả lời, rà lại ngôi kể trong mọi đoạn tường thuật.`;
-  }
-
-  const namedDialogueRule = 'NPC chỉ được nói khi có tên riêng rõ ràng. Giới thiệu tên NPC trong lời kể trước câu thoại đầu tiên, dùng nhất quán tên đó trong speaker. Không dùng NPC, Chưa rõ người nói, Người lạ, Cô gái, Nàng hoặc chức danh chung làm tên. Với nhân vật hư cấu mới, đặt tên phù hợp thời kỳ và thế giới; với nhân vật đã có tên, giữ nguyên tên. Nếu NPC chưa có tên, ngươi phải tự nghĩ ra ngay một họ tên Hán Việt hợp thời đại, vùng đất, thân phận và giới tính của nhân vật, giới thiệu tên trong lời kể và dùng nhất quán cho nhân vật đó. Khi bối cảnh là một thời kỳ lịch sử có thật, hãy ưu tiên đưa vào các nhân vật lịch sử thật của thời kỳ đó (tướng lĩnh, mưu sĩ, quan lại, danh y, danh sĩ, kể cả nhân vật ít tên tuổi) với đúng vai trò, phe phái, nơi chốn và thời điểm họ thực sự có mặt; không bịa thêm chi tiết trái với sử. Không dừng truyện, không yêu cầu người chơi cung cấp tên. Không gán lời của NPC sang người chơi. Mọi tên xuất hiện trong các ví dụ của bản hướng dẫn này (Lâm Tuyết, Tống Thúy, Lâm Vân Phong, Tô Thanh Dao…) chỉ là minh họa cách viết, TUYỆT ĐỐI không dùng làm tên nhân vật trong truyện. Tên và giới tính của speaker phải khớp với nhân vật vừa được kể là đang nói: một người đàn ông mặc giáp vừa bước tới thì người nói phải là tên nam của chính người đó, không phải một cái tên nữ hay tên ở đâu khác.';
-
-  function addressRule(profile) {
-    return `XƯNG HÔ TRONG LỜI THOẠI NHẤT QUÁN: Mỗi người nói chọn đúng một cặp xưng hô hợp với quan hệ, tuổi tác và địa vị so với người nghe, rồi giữ nguyên cặp đó trong cả câu thoại và các lượt sau: ta–ngươi (ngang hàng hoặc bề trên nói với bề dưới), tại hạ–các hạ (lịch sự giữa người lạ), huynh–đệ, tỷ–muội, lão phu–tiểu tử, cháu–ông/bác, con–cha/mẹ, thiếp–chàng, thuộc hạ–chủ công. Hai vế của cặp phải khớp vai: đã xưng "cháu", "con", "thuộc hạ" thì gọi người nghe là "ông", "bác", "cha", "chủ công", không gọi là "ngươi"; đã gọi người nghe là "ngươi" thì xưng "ta", "lão phu", "bổn tọa", không xưng "cháu" hay "con". Mẫu sai: "Cháu ở đây đợi ngươi suốt cả ngày." Mẫu đúng: "Ta ở đây đợi ngươi suốt cả ngày." hoặc "Cháu ở đây đợi bác suốt cả ngày." Từ dùng để gọi người đối diện phải là cách gọi có thật trong tiếng Việt cổ trang, hợp tuổi và vai: gọi người trẻ hơn thì tiểu tử, tiểu huynh đệ, tiểu cô nương, công tử, cậu bé, nhóc con, cháu; gọi ngang hàng thì huynh đài, các hạ, đạo hữu, cô nương, huynh, đệ; gọi người trên thì tiền bối, lão nhân gia, đại nhân, tướng quân, sư phụ, trưởng lão. "Chàng" chỉ dành cho nữ gọi nam khi đã thân thiết hay có tình ý (đi với "thiếp"); nam gọi nam, người lạ gọi nhau hay nữ mới gặp nam đều không dùng "chàng", mà dùng công tử, huynh đài, các hạ, tiểu tử, ngươi tùy vai. Tương tự "nàng" trong lời thoại chỉ dành cho nam gọi nữ đã thân thiết; người lạ gọi cô nương, tiểu thư, phu nhân. Tuyệt đối không bịa ra cách gọi dịch máy móc như "chú trẻ", "người trẻ", "bạn trẻ", "anh bạn", "quý ông", "quý cô". Khi gọi tên người khác trong thoại, viết đúng từng chữ tên đã xác lập; tên nhân vật người chơi là ${profile.name}, không viết thành dạng khác. Trước khi trả lời, rà lại từng câu thoại xem xưng hô có đổi vai giữa chừng không.`;
-  }
-
-  const vocabularyRule = 'TỪ NGỮ PHẢI LÀ TIẾNG VIỆT CÓ THẬT: Chỉ dùng từ và cụm từ tiếng Việt có nghĩa, đúng chính tả, mà độc giả Việt Nam hiểu ngay. Không bịa từ, không ghép âm tiết thành chữ vô nghĩa, không bóp méo từ láy (sai: "ngó nghê ngoe", "lóng lánh lung", "tướng gián tiếp"; đúng: "ngó nghiêng", "lấp ló dò xét", "lấp lánh", "tướng canh gác"). Từ Hán Việt chỉ dùng khi là từ thông dụng trong truyện kiếm hiệp, tiên hiệp (tiền bối, công tử, cảnh giới, linh khí…); không tự tạo từ Hán Việt lạ. Khi không chắc một từ có tồn tại, thay bằng từ thuần Việt đơn giản. Trước khi trả lời, đọc lại từng câu và sửa mọi chữ vô nghĩa.';
-
-  const affinityRule = 'HẢO CẢM QUYẾT ĐỊNH THÁI ĐỘ NPC: Mỗi NPC có điểm hảo cảm với người chơi từ -100 đến 100 ghi trong hồ sơ; thái độ, lời lẽ và hành động của họ phải đúng mức đó. Kẻ thù sinh tử (-100..-80): tìm cách hại, giết, không nghe lý lẽ. Thù địch (-79..-50): khinh ghét, cản trở, có thể ra tay. Ác cảm (-49..-20): lạnh nhạt, nghi ngờ, từ chối giúp. Trung lập (-19..19): xã giao, cẩn trọng, giúp khi có lợi. Thiện cảm (20..49): cởi mở, sẵn lòng giúp việc nhỏ. Thân thiết (50..79): tin cậy, chia sẻ bí mật, giúp việc lớn, có thể nảy sinh tình cảm. Bậc cao nhất (80..100) gọi theo giới tính: nữ là Tri kỷ (sống chết có nhau, có thể thành người thương), nam là Hảo hữu (huynh đệ sinh tử, hy sinh vì nhau); nam với nam không bao giờ là tri kỷ hay tình nhân, trừ khi người chơi tự nhập như vậy. Hảo cảm chỉ thay đổi từ từ qua hành động thật trong truyện, không nhảy vọt vì một câu nói; không bao giờ ghi con số hảo cảm vào truyện.';
-
-  const combatRule = 'GIAO CHIẾN PHẢI KỂ RÕ TỪNG ĐƯỜNG: Khi có đánh nhau, không được tóm tắt kiểu "trận chiến bắt đầu" hay "hai người giao đấu một hồi". Kể theo từng hiệp, mỗi hiệp gồm đủ bốn ý: (1) ai ra tay, bằng chiêu gì (gọi tên chiêu thức hoặc tả rõ động tác, vũ khí, hướng đánh; nhân vật chính chỉ dùng kỹ năng và trang bị đang có, người thường chưa tu luyện thì chỉ có quyền cước, binh khí thường); (2) chiêu đó nhắm vào đâu và uy lực ra sao; (3) đối thủ ứng phó thế nào: né tránh, đỡ đòn, phản công hay chịu đòn, và vì sao; (4) kết quả thật: trúng hay hụt, bị thương ở đâu, nặng nhẹ, mất thế hay giữ thế. Khi lượt này có KỊCH BẢN GIAO CHIẾN do hệ thống tính sẵn thì số đòn, thứ tự ra đòn, mức thương tích và kết cục phải theo đúng kịch bản, không thêm bớt; không có kịch bản (đánh thú hoang, lính vô danh) thì ít nhất 3 hiệp và chênh lệch cấp độ, chỉ số phải thể hiện trong kết quả từng hiệp. Không bao giờ ghi con số chỉ số, máu hay phần trăm vào truyện. Kết thúc đoạn giao chiến phải nêu rõ trạng thái hai bên: còn đứng được không, thương tích, ai thắng thế, trận đánh đã kết thúc hay còn tiếp diễn. Nếu người chơi chỉ mới khơi mào hoặc nhận lời đánh, hãy kể hiệp đầu tiên ngay trong lượt này thay vì dừng ở lời hẹn.';
-
-  const hiddenGoalRule = 'MỤC TIÊU LÀ ĐỘNG CƠ THẦM KÍN, KHÔNG BAO GIỜ NÓI RA: MỤC TIÊU và BƯỚC TIẾP THEO chỉ là định hướng cho người dẫn truyện để sắp xếp tình tiết; chúng tồn tại trong đầu nhân vật chính, không tồn tại trong thế giới truyện. Tuyệt đối không nhắc nguyên văn hay diễn đạt lại mục tiêu trong lời kể, trong lời thoại của nhân vật chính hay của bất kỳ NPC nào; không để nhân vật chính tuyên bố, tâm sự, nói bóng gió hay tự nhủ thành tiếng về mục tiêu; NPC không biết và không được đoán ra mục tiêu trừ khi chính hành động người chơi nhập vào đã nói ra. Hãy thể hiện mục tiêu bằng việc làm: nhân vật chính âm thầm chọn nơi đến, người làm quen, câu hỏi đặt ra, ân tình gây dựng, mỗi lượt tiến thêm một bước nhỏ và kín đáo. Mẫu sai: "Ta tới đây để dựng hậu cung mỹ nhân." Mẫu đúng: nhân vật chính hỏi thăm nàng về gia cảnh, giúp nàng một việc nhỏ, ghi nhớ nơi nàng ở. Những mục tiêu tai tiếng hay nguy hiểm nếu bị nói ra phải mang hậu quả thật: bị khinh ghét, tố cáo, truy bắt.';
-
-  const coherentProseRule = 'VIẾT CÓ NGHĨA VÀ ĐÚNG BỐI CẢNH: Mỗi câu phải rõ chủ thể, hành động và đối tượng; lời thoại phải có mục đích phù hợp tình huống. Địa danh, phe phái, chức danh phải nhất quán với thế giới và thời kỳ đã chọn. Không ghép tên tùy tiện thành địa danh hoặc tổ chức như "biên giới Mạnh", "Mạnh Tông" khi chưa được xác lập. Với nhân vật lịch sử, không tự đổi phe phái hoặc vai trò nếu người chơi chưa thiết lập lịch sử thay thế. Nếu chưa đủ dữ kiện, dùng mô tả địa điểm rõ ràng như "bìa rừng phía bắc doanh trại", không bịa tên như một sự thật đã biết. Địa danh hư cấu mới phải được giới thiệu quan hệ với nơi hiện tại và vai trò trong tình huống. Trước khi trả lời, rà lại tên riêng, ý nghĩa câu và sự liên kết giữa lời kể với lời thoại. Trong lời kể, mọi tên nhân vật đều viết trong cặp **...** mỗi lần xuất hiện (ví dụ: **Lâm Tuyết** khẽ gật đầu); có thể dùng thêm **thân phận**, **cảnh giới** để nhấn mạnh chọn lọc; không bọc cả đoạn hoặc dùng các kiểu Markdown khác. Người nói trong thẻ thoại phải là chính nhân vật vừa được kể là đang nói, không lấy địa danh hay tên người khác vừa nhắc tới làm speaker.';
-
-  const hanVietRule = 'TÊN RIÊNG PHẢI LÀ ÂM HÁN VIỆT: Mọi tên người, địa danh, tông môn, chức danh, công pháp và thuật ngữ gốc Trung Hoa đều viết bằng âm Hán Việt có dấu tiếng Việt, không viết bính âm (pinyin) và không kèm chữ Hán. Đúng: Tào Tháo, Lưu Bị, Gia Cát Lượng, Hứa Xương. Sai: Cao Cao, Liu Bei, Zhuge Liang, Xuchang, hoặc tên mang dấu thanh bính âm như Wáng Hào, Zhāng Wěi. Các tên này chỉ minh họa cách viết, không tự đưa vào truyện. Điều này áp dụng cho cả thuộc tính speaker trong thẻ thoại và mọi tên trong lời kể. Nếu bối cảnh là tác phẩm hay lịch sử Trung Hoa, dùng đúng tên Hán Việt quen thuộc với độc giả Việt Nam; nhân vật hư cấu mới cũng đặt tên Hán Việt. Trước khi trả lời, rà lại mọi tên riêng và sửa hết dạng bính âm.';
-
   // Output guard for the rule above: small local models still slip into pinyin now and then, so names that look
   // like pinyin are sent to one short Ollama call for their Hán Việt reading and replaced before rendering.
   // Answers are cached per name (a name mapped to itself means "not pinyin", e.g. a Western name).
@@ -990,6 +1002,110 @@
       .reduce((result, name) => result.split(name).join(nameFixes.get(nameKey(name))), text);
   }
 
+  // Output guard for vocabularyRule. vietnamese.js knows every syllable the spelling allows; a lower-case word
+  // outside that set ("thiếnh", "xian", a garbled token) is not Vietnamese. Only the sentences carrying such
+  // words go back to the model, at temperature 0, to be rewritten with real words; a rewrite is accepted only
+  // when it is a sentence of similar length that carries fewer invalid words and no markup.
+  const MAX_REPAIR_SENTENCES = 8;
+  async function fixVietnameseWords(text, model, profile) {
+    const lexicon = window.VietnameseLexicon;
+    if (!lexicon || !model || !text) return text;
+    // Names are capitalised and skipped by the lexicon anyway; this also covers a name typed in lower case.
+    const allowed = [profile.name, ...npcProfiles.keys()].flatMap(name => String(name || '').split(/\s+/));
+    const flagged = lexicon.findInvalidSentences(text, allowed).slice(0, MAX_REPAIR_SENTENCES);
+    if (!flagged.length) return text;
+    help.textContent = `Đang sửa ${flagged.length} câu có chữ không phải tiếng Việt (${flagged.flatMap(item => item.words).slice(0, 6).join(', ')})…`;
+    try {
+      const response = await fetchWithTimeout(`${OLLAMA_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: 'Ngươi là biên tập viên tiếng Việt cho truyện tiên hiệp. Mỗi câu được đưa có một hoặc vài chữ không phải tiếng Việt: chữ bịa, sai chính tả, ghép âm tiết vô nghĩa, bính âm hoặc ký tự lỗi. Viết lại từng câu bằng tiếng Việt có thật và đúng chính tả, giữ nguyên ý, nhân vật, xưng hô, ngôi kể, dấu ** quanh tên và độ dài tương đương; chỉ thay những chữ sai, không thêm tình tiết hay lời bình. Tên riêng gốc Trung Hoa viết bằng âm Hán Việt có dấu. Trả về JSON {"fixes":[{"from":"câu gốc","to":"câu đã sửa"}]} cho đủ mọi câu, from giữ nguyên văn câu gốc.' },
+            { role: 'user', content: `BỐI CẢNH: ${(profile.setting || profile.worldName || '').slice(0, 200)}\n\n${flagged.map((item, index) => `${index + 1}. Chữ nghi sai: ${item.words.join(', ')}\nCâu: ${item.text}`).join('\n\n')}` }
+          ],
+          format: { type: 'object', properties: { fixes: { type: 'array', items: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' } }, required: ['from', 'to'] } } }, required: ['fixes'] },
+          think: false,
+          stream: false,
+          keep_alive: '10m',
+          options: { num_ctx: OLLAMA_NUM_CTX, temperature: 0, num_predict: 160 + flagged.reduce((total, item) => total + Math.ceil(item.text.length / 2), 0) }
+        })
+      }, 180000);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `Ollama trả về HTTP ${response.status}.`);
+      const fixes = JSON.parse(data.message?.content?.match(/\{[\s\S]*\}/)?.[0] || '{}').fixes || [];
+      let result = text;
+      flagged.forEach((item, index) => {
+        const fix = fixes.find(entry => entry.from === item.text) || (fixes.length === flagged.length ? fixes[index] : null);
+        const to = String(fix?.to || '').replace(/\s+/g, ' ').trim();
+        if (!to || to === item.text || /[<>]/.test(to)) return;
+        if (to.length < item.text.length * 0.5 || to.length > item.text.length * 1.6) return;
+        if (lexicon.findInvalidWords(to, allowed).length >= item.words.length) return;
+        if (!result.includes(item.text)) return;
+        result = result.split(item.text).join(to);
+        window.languageFeedback?.recordAutoRepair({ before: item.text, after: to });
+      });
+      return result;
+    } catch (error) {
+      console.warn('Không sửa được chữ sai; giữ nguyên câu trong lượt này.', error);
+      return text;
+    }
+  }
+
+  // Output guard for the "example names are not story names" clause. A name from the rules that appears in a
+  // new passage, and that the story has not already established as a character, is renamed: one short JSON
+  // call asks for a fitting Hán Việt name per leaked name, then every mention (speaker attributes included)
+  // is replaced. If the call fails the passage is kept as is; the rule itself is the first line of defence.
+  function establishedNames() {
+    return new Set([
+      ...npcProfiles.keys(),
+      ...[...npcProfiles.values()].map(profile => profile.fullName),
+      ...[...story.querySelectorAll('.story-entry .speaker')].map(node => node.firstChild?.textContent.trim()),
+      ...chapterState.turns.flatMap(turn => EXAMPLE_NAMES.filter(name => turn.narrative.includes(name)))
+    ].filter(Boolean));
+  }
+  async function fixExampleNames(text, model, profile) {
+    const known = establishedNames();
+    const leaked = EXAMPLE_NAMES.filter(name => name !== profile.name && !known.has(name) && text.includes(name));
+    if (!leaked.length || !model) return text;
+    help.textContent = `Đang đổi tên minh họa lọt vào truyện (${leaked.join(', ')})…`;
+    try {
+      const response = await fetchWithTimeout(`${OLLAMA_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: 'Ngươi đặt lại tên cho nhân vật hoặc địa danh trong game truyện cổ trang. Mỗi tên được đưa là tên minh họa bị cấm dùng; hãy đặt một tên mới bằng âm Hán Việt có dấu, cùng loại (người thì họ tên hai hoặc ba chữ hợp giới tính và thân phận thể hiện trong đoạn truyện, địa danh hay tổ chức thì tên cùng kiểu), hợp thế giới và thời kỳ, không trùng tên đã có trong đoạn truyện. Trả về JSON {"names":[{"from":"…","to":"…"}]} cho đủ mọi tên, from giữ nguyên.' },
+            { role: 'user', content: `BỐI CẢNH: ${(profile.setting || profile.worldName || '').slice(0, 300)}\nTÊN ĐÃ CÓ (không được trùng): ${[profile.name, ...known].join(', ')}\nTÊN CẦN ĐỔI:\n${leaked.map(name => `- ${name}`).join('\n')}\n\nĐOẠN TRUYỆN:\n${text.slice(0, 3000)}` }
+          ],
+          format: { type: 'object', properties: { names: { type: 'array', items: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' } }, required: ['from', 'to'] } } }, required: ['names'] },
+          think: false,
+          stream: false,
+          keep_alive: '10m',
+          options: { num_ctx: OLLAMA_NUM_CTX, temperature: 0.7, top_p: 0.9, num_predict: 40 + leaked.length * 30 }
+        })
+      }, 120000);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `Ollama trả về HTTP ${response.status}.`);
+      const answers = JSON.parse(data.message?.content?.match(/\{[\s\S]*\}/)?.[0] || '{}').names || [];
+      let result = text;
+      leaked.forEach((name, index) => {
+        const entry = answers.find(item => item.from === name) || (answers.length === leaked.length ? answers[index] : null);
+        const to = String(entry?.to || '').replace(/[<>"*]/g, '').replace(/\s+/g, ' ').trim();
+        // A usable name: Hán Việt words in capitals, not another example name, not a name the story already has.
+        if (!to || to === name || EXAMPLE_NAMES.includes(to) || known.has(to) || to === profile.name) return;
+        if (!/^\p{Lu}[\p{L}]*(?:\s\p{Lu}[\p{L}]*){1,3}$/u.test(to) || to.split(/\s+/).some(looksLikePinyin)) return;
+        result = result.split(name).join(to);
+      });
+      return result;
+    } catch (error) {
+      console.warn('Không đổi được tên minh họa; giữ nguyên trong lượt này.', error);
+      return text;
+    }
+  }
+
   // Blood and whole corpses are gathered only by the demonic school that cultivates with them (see lootCollects in loot.js).
   function lootRule() {
     const school = activeDemonic()?.[5] || '';
@@ -1008,33 +1124,11 @@
     ].join(' ');
   }
 
+
+  // Rules live in narration-rules.js (shared with tools/eval-language.mjs); only the loot line and the
+  // player's saved corrections depend on the running game.
   function buildSystemPrompt(profile) {
-    return [
-      'Ngươi là người dẫn truyện tương tác cho game tiên hiệp Vạn Giới Ký. Viết hoàn toàn bằng tiếng Việt tự nhiên, giàu hình ảnh và có nhịp kể cuốn hút; dùng từ cổ phong vừa phải, không dịch sát văn phong tiếng Anh.',
-      'Tiếp nối nhất quán bối cảnh và sự kiện đã xảy ra. Dùng hồ sơ thế giới, mục tiêu, chỉ số, trang bị, kỹ năng và đoạn truyện gần nhất làm ngữ cảnh bắt buộc; ưu tiên chi tiết đã được xác lập, không tự đổi tuổi, thân phận, địa điểm, quan hệ, quy tắc sức mạnh hoặc trạng thái tài nguyên. Nếu thiếu thông tin, không khẳng định chi tiết mới như sự thật đã có.',
-      'BỘ NHỚ CÁC CHƯƠNG TRƯỚC là dữ kiện liên tục đã được kể. Không tái diễn lại cảnh, hành động, lời thoại hoặc tiết lộ trong đó; chỉ nhắc ngắn nếu cần để nối mạch. Ưu tiên diễn biến mới và giải quyết các việc còn dang dở khi hành động hiện tại dẫn tới.',
-      'Trong chương hiện tại, không sao chép lại bất kỳ câu, đoạn văn hay cảnh nào đã xuất hiện trong phần truyện gần đây, kể cả khi thay đổi vài từ. Chỉ nhắc lại dữ kiện cũ khi cần cho mạch truyện; không dựng lại cùng một khung cảnh hoặc hồi tưởng đã kể.',
-      'MẠCH TRUYỆN VÀ HỒI ĐÁP TRỰC TIẾP (ƯU TIÊN CAO NHẤT): Đọc HÀNH ĐỘNG / LỜI THOẠI NGƯỜI CHƠI và DIỄN BIẾN GẦN ĐÂY trước khi viết. Tiếp tục đúng cảnh, địa điểm, thời điểm, người đang có mặt và việc đang dang dở ở cuối phần gần đây. Nếu người chơi hỏi hoặc nói với một nhân vật, nhân vật đó phải nghe và trả lời đúng trọng tâm ngay trong lượt này; không né câu hỏi, không để người khác trả lời thay nếu không có lý do trong cảnh. Sau câu trả lời, mới kể nét mặt, hành động và hệ quả có quan hệ nhân quả rõ với câu hỏi/hành động ấy. Mỗi đoạn phải nối với đoạn ngay trước bằng hành động, lời đáp, phản ứng hoặc hệ quả; không tự chuyển cảnh, đổi chủ đề, thêm người lạ hay biến cố bất chợt không liên quan. Không bắt buộc tạo bước ngoặt ở mọi lượt; chỉ thêm sự kiện mới khi nó phát sinh hợp lý từ hành động hiện tại hoặc người chơi bật tùy chọn tình tiết bất ngờ. Không tự bịa rằng NPC đã biết điều chưa được tiết lộ.',
-      'Mỗi lượt hồi đáp hướng tới khoảng 1.500–2.000 từ tiếng Việt, thường chia thành 12–20 đoạn tự nhiên; chất lượng và mạch truyện quan trọng hơn độ dài. Kể lại toàn bộ hành động và lời thoại người chơi theo đúng thứ tự, không bỏ sót bước nào, câu nào: tường thuật được viết lại cho giàu hình ảnh, lời thoại được trau chuốt câu chữ nhưng giữ nguyên nội dung và ý; chỉ được thêm, không được cắt. Sau đó mới viết phản ứng và hệ quả. Mỗi đoạn phải đóng góp diễn biến, phản ứng, thông tin hoặc hệ quả mới gắn với cảnh đang diễn ra. Không lặp lại cùng hành động/hình ảnh/lời thoại; không kéo dài bằng câu rỗng. Bắt đầu ngay tại thời điểm câu chuyện đang dở. Chỉ cho nhân vật chính thực hiện những gì người chơi đã nêu; không tự thêm quyết định, lời thoại hay suy nghĩ mới cho họ.',
-      'ĐỊNH DẠNG ĐẦU RA CÓ CẤU TRÚC (BẮT BUỘC, KHÔNG ĐƯỢC BỎ QUA): Bất cứ câu nào một nhân vật nói thành tiếng đều phải nằm trong thẻ <dialogue speaker="Tên nhân vật">Lời nói</dialogue>. Quy tắc này áp dụng cho cả nhân vật chính và mọi NPC. Không viết lời thoại trần trong dấu ngoặc kép, không gắn lời thoại vào giữa đoạn tường thuật. Mẫu đúng: Nàng khựng bước. <dialogue speaker="Diệp Thần">Cô vừa nói gì?</dialogue> Người thiếu nữ siết cuốn sách trong tay. <dialogue speaker="Tống Thúy">Ta nói viên đá này có thể soi thấy quá khứ.</dialogue> Mẫu sai: Nàng hỏi: “Cô vừa nói gì?” Mỗi lượt nói có một thẻ riêng, speaker là tên chính xác người đang nói. Chỉ lời kể, hành động, suy nghĩ và miêu tả để ngoài thẻ. Âm thanh, tiếng động, từ mô phỏng tiếng động như “phịch”, “vù”, “rầm”, “keng” là tường thuật, tuyệt đối không cho vào thẻ thoại. Tên gọi, danh xưng, tên cảnh giới hay thuật ngữ được nhắc giữa câu kể (ví dụ: còn gọi là Đấu Tông sơ kỳ) cũng là tường thuật, không cho vào thẻ thoại. Muốn làm nổi bật tên gọi, thuật ngữ hay tiếng động thì viết trong cặp **...** (ví dụ: còn gọi là **Đấu Tông sơ kỳ**), tuyệt đối không dùng dấu ngoặc kép hay ngoặc đơn. Tuyệt đối không dùng chữ Hán hoặc từ viết bằng chữ Hán; chỉ viết tiếng Việt bằng chữ Quốc ngữ. Trước khi trả lời, tự rà lại và bọc mọi câu thoại còn sót; chỉ xuất truyện, không xuất lời giải thích.',
-      adultIntimacyRule(profile),
-      worldDirective(profile),
-      narrationPerspectiveRule(profile),
-      namedDialogueRule,
-      addressRule(profile),
-      hiddenGoalRule,
-      combatRule,
-      affinityRule,
-      vocabularyRule,
-      hanVietRule,
-      coherentProseRule,
-      lootRule(),
-      'Chỉ xuất phần truyện có thể hiện cho người chơi. Không viết suy nghĩ nội bộ, phân tích, kế hoạch, lời dẫn meta, tiêu đề, đánh số đoạn; chỉ cho phép **cụm từ** để nhấn mạnh trong lời kể. Không lặp lại yêu cầu.',
-      `Gán speaker theo người thực sự nói trong tình tiết. Lời của nhân vật chính phải ghi speaker="${profile.name}"; không dùng Lời, Lời nói hoặc đại từ làm tên NPC. Giữ suy nghĩ nội tâm trong lời kể.`,
-      `HỒ SƠ NHÂN VẬT: ${profile.name}${profile.age ? `, ${profile.age} tuổi` : ''}; thân phận: ${profile.identity || 'chưa xác định'}; cảnh giới: ${profile.realm || 'chưa xác định'}.`,
-      `BỐI CẢNH THẾ GIỚI: ${profile.setting || 'Thế giới tu tiên với tông môn, cảnh giới, bí cảnh và cơ duyên.'}`,
-      `MỤC TIÊU (thầm kín, không được nói ra trong truyện): ${profile.goal || 'Tiếp tục hành trình tu hành theo lựa chọn của người chơi.'}`
-    ].filter(Boolean).join('\n\n');
+    return buildNarrationSystemPrompt(profile, { lootRule: lootRule(), corrections: window.languageFeedback?.recentCorrections() || [] });
   }
 
   async function generateOpeningText(profile) {
@@ -1088,13 +1182,13 @@
           think: false,
           stream: false,
           keep_alive: '10m',
-          options: { num_ctx: OLLAMA_NUM_CTX, temperature: 0.7, top_p: 0.9, repeat_penalty: 1.08, repeat_last_n: 256, num_predict: -1 }
+          options: { num_ctx: OLLAMA_NUM_CTX, ...NARRATION_SAMPLING, temperature: 0.7, num_predict: -1 }
         })
       }, 600000);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || `Ollama trả về HTTP ${response.status}.`);
       // The opening grants nothing; drop a loot line if the model adds one anyway.
-      const openingText = await fixPinyinNames(extractLoot(data.message?.content?.trim() || '').text, model, profile);
+      const openingText = await fixVietnameseWords(await fixPinyinNames(await fixExampleNames(extractLoot(data.message?.content?.trim() || '').text, model, profile), model, profile), model, profile);
       const opening = removeRepeatedPassages(await nameUnknownSpeakers(normalizeDialogue(openingText, profile.name), model, profile));
       if (!opening) throw new Error('Model không trả về đoạn mở đầu.');
       setStatus('ready');
@@ -1358,10 +1452,10 @@
     const recentStory = formatRecentStoryContext();
     const surprise = document.querySelector('#surprise-event').checked;
     let combat = null;
-    const buildUserMessage = () => [
-      `${getWorldContext(profile)}\n\nDIỄN BIẾN GẦN ĐÂY (ưu tiên mạch mới nhất):\n${recentStory}`,
-      `BỘ NHỚ TỐI ĐA ${MAX_REMEMBERED_CHAPTERS} CHƯƠNG HOÀN TẤT GẦN NHẤT:\n${formatChapterMemory()}`,
-      `CÁC LƯỢT ĐÃ KỂ TRONG CHƯƠNG ${chapterState.chapterNumber} (không kể lại):\n${formatCurrentChapterContext()}`,
+    const buildUserMessage = ({ recentChars = 5600, latestChars = 3200, memoryChars = 4000 } = {}) => [
+      `${getWorldContext(profile)}\n\nDIỄN BIẾN GẦN ĐÂY (ưu tiên mạch mới nhất):\n${recentChars === 5600 ? recentStory : formatRecentStoryContext(recentChars)}`,
+      `BỘ NHỚ TỐI ĐA ${MAX_REMEMBERED_CHAPTERS} CHƯƠNG HOÀN TẤT GẦN NHẤT:\n${formatChapterMemory(memoryChars)}`,
+      `CÁC LƯỢT ĐÃ KỂ TRONG CHƯƠNG ${chapterState.chapterNumber} (không kể lại):\n${formatCurrentChapterContext(latestChars)}`,
       `HÀNH ĐỘNG / LỜI THOẠI NGƯỜI CHƠI (bắt buộc kể lại đầy đủ, đúng thứ tự, ngay đầu lượt):\n${action}`,
       surprise ? 'Hãy thêm một tình tiết bất ngờ hợp lý, có dấu hiệu gieo trước và không giải quyết mọi việc quá dễ dàng.' : '',
       combat ? `KỊCH BẢN GIAO CHIẾN GIỮA ${profile.name} VÀ ${combat.npc.speaker} (hệ thống đã tính xong theo chỉ số; BẮT BUỘC kể đúng số đòn, đúng thứ tự ai ra đòn, đúng mức thương tích và đúng kết cục; không được thêm bớt đòn, không đổi người thắng; tuyệt đối không ghi con số, phần trăm hay tên chỉ số vào truyện — chỉ miêu tả chiêu thức, động tác, cách né đỡ, vết thương và hơi thở của hai bên):\n${combat.script}` : '',
@@ -1391,7 +1485,7 @@
           think: false,
           stream: false,
           keep_alive: '10m',
-          options: { num_ctx: OLLAMA_NUM_CTX, temperature: 0.65, top_p: 0.9, repeat_penalty: 1.08, repeat_last_n: 256, num_predict: 6000 }
+          options: { num_ctx: OLLAMA_NUM_CTX, ...NARRATION_SAMPLING, num_predict: 6000 }
         })
       }, 600000);
       const data = await response.json();
@@ -1406,7 +1500,15 @@
       help.textContent = combat
         ? `Trận đấu với ${combat.npc.speaker} đã được tính xong (${combat.result.strikes.length} đòn); model đang viết lại diễn biến…`
         : 'Model đang viết phần truyện dài khoảng 1.500–2.000 từ; có thể mất vài phút, nhất là lần gọi đầu.';
-      userMessage = buildUserMessage();
+      // The whole prompt must leave OUTPUT_RESERVE_TOKENS free inside num_ctx, or Ollama drops the start of
+      // it (the rules) without saying so. Story context shrinks step by step until it fits.
+      const systemTokens = estimateTokens(buildSystemPrompt(profile));
+      let fitted = false;
+      for (const budget of CONTEXT_BUDGETS) {
+        userMessage = buildUserMessage(budget);
+        if (systemTokens + estimateTokens(userMessage) <= OLLAMA_NUM_CTX - OUTPUT_RESERVE_TOKENS) { fitted = true; break; }
+      }
+      if (!fitted) console.warn(`Prompt ước lượng ${systemTokens + estimateTokens(userMessage)} token vẫn vượt ngân sách của num_ctx ${OLLAMA_NUM_CTX}; hãy tăng ngữ cảnh trong Thiết lập.`);
       let raw = await requestTurn([]);
       // The model must retell everything the player wrote. If it dropped a line, ask once more
       // naming what is missing; if it still drops it, put the player's own words in front.
@@ -1427,8 +1529,10 @@
         ...[...story.querySelectorAll('.narration, .story-entry dialogue')].map(node => node.textContent.trim())
       ];
       const loot = extractLoot(raw);
-      const answer = removeRepeatedPassages(await nameUnknownSpeakers(normalizeDialogue(await fixPinyinNames(loot.text, model, profile), profile.name), model, profile), priorStory);
+      const answer = removeRepeatedPassages(await nameUnknownSpeakers(normalizeDialogue(await fixVietnameseWords(await fixPinyinNames(await fixExampleNames(loot.text, model, profile), model, profile), model, profile), profile.name), model, profile), priorStory);
       if (!answer) throw new Error('Model không trả về phần truyện.');
+      // The finished turn, with its exact prompt, feeds the exportable fine-tuning set (language-feedback.js).
+      window.languageFeedback?.recordTurn({ action, system: buildSystemPrompt(profile), user: userMessage, answer, model });
 
       answer.split(/\n\s*\n/).map(part => part.trim()).filter(Boolean)
         .forEach(part => appendNarrationWithDialogue(part, profile.name));
@@ -1455,6 +1559,18 @@
       modelInput.disabled = false;
       turnButton.innerHTML = `${turnButton.dataset.originalText || 'Thực hiện'} <span>✦</span>`;
     }
+  }
+
+  const numCtxSelect = document.querySelector('#ai-num-ctx');
+  if (numCtxSelect) {
+    numCtxSelect.value = String(OLLAMA_NUM_CTX);
+    numCtxSelect.addEventListener('change', () => {
+      const chosen = Number(numCtxSelect.value);
+      if (!NUM_CTX_CHOICES.includes(chosen)) return;
+      OLLAMA_NUM_CTX = chosen;
+      try { localStorage.setItem(NUM_CTX_KEY, String(chosen)); } catch (error) { console.warn('Không lưu được ngữ cảnh đã chọn.', error); }
+      help.textContent = `Ngữ cảnh ${chosen} token sẽ dùng từ lời gọi tiếp theo; Ollama nạp lại model một lần.`;
+    });
   }
 
   checkButton.addEventListener('click', checkConnection);

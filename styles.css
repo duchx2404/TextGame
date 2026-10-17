@@ -31,3 +31,4 @@ button.avatar{background:none;color:inherit;padding:0;cursor:pointer}button.avat
 *::-webkit-scrollbar-thumb:hover{background:rgba(118,101,62,.65);background-clip:padding-box}
 *::-webkit-scrollbar-button{display:none;width:0;height:0}
 *::-webkit-scrollbar-corner{background:transparent}
+.narration.editing,dialogue.editing{outline:1px dashed var(--gold);outline-offset:4px;background:rgba(255,248,224,.85);cursor:text}.narration:hover,dialogue:hover{cursor:text}.feedback-actions{grid-template-columns:1fr auto}.feedback-actions button{border:1px solid #80622c;background:#f5edda;color:#71531e;padding:9px 12px;font:11px "Noto Serif",serif;cursor:pointer}.feedback-actions button:disabled{opacity:.5;cursor:default}#ai-num-ctx{font-size:11px}
