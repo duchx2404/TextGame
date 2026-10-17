@@ -470,7 +470,7 @@
     const remotePage = location.protocol === 'https:' && !['localhost', '127.0.0.1'].includes(location.hostname);
     const detail = error?.name === 'AbortError' ? 'Ollama chưa phản hồi kịp thời.' : 'Ollama chưa chạy hoặc trình duyệt chưa được phép kết nối tới máy cục bộ.';
     help.textContent = remotePage
-      ? `${detail} Với GitHub Pages, đặt biến môi trường Windows OLLAMA_ORIGINS=https://lavie2404.github.io, rồi thoát và mở lại Ollama. Chỉ cho phép đúng origin này; không dùng dấu *.`
+      ? `${detail} Với GitHub Pages, đặt biến môi trường Windows OLLAMA_ORIGINS=https://duchx2404.github.io, rồi thoát và mở lại Ollama. Chỉ cho phép đúng origin này; không dùng dấu *.`
       : `${detail} Mở Ollama rồi thử kiểm tra lại.`;
   }
 
@@ -1198,7 +1198,7 @@
       setStatus('error');
       setHelpForError(error);
       if (error?.name === 'TypeError' && location.protocol === 'https:') {
-        throw new Error('Không kết nối được Ollama trên máy này. Kiểm tra Ollama đang chạy và đã cho phép origin https://lavie2404.github.io.');
+        throw new Error('Không kết nối được Ollama trên máy này. Kiểm tra Ollama đang chạy và đã cho phép origin https://duchx2404.github.io.');
       }
       throw error;
     }

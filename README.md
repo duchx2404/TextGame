@@ -44,4 +44,4 @@ Khi đã gom vài trăm lượt với bản sửa tay, có thể fine-tune LoRA 
 
 ## Chạy
 
-Mở `index.html` (hoặc trang GitHub Pages), chạy Ollama có model được ghi trong Thiết lập. Với GitHub Pages cần `OLLAMA_ORIGINS=https://lavie2404.github.io` để trình duyệt gọi được Ollama local.
+Mở `index.html` (hoặc trang GitHub Pages), chạy Ollama có model được ghi trong Thiết lập. Với GitHub Pages cần `OLLAMA_ORIGINS=https://duchx2404.github.io` để trình duyệt gọi được Ollama local.
