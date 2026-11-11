@@ -26,7 +26,7 @@ const rules = require(join(root, 'narration-rules.js'));
 
 const args = parseArgs(process.argv.slice(2));
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
-const model = args.model || 'huihui_ai/qwen3-abliterated:14b';
+const model = args.model || 'huihui_ai/gemma-4-abliterated:12b';
 const numCtx = Number(args['num-ctx'] || 12288);
 const numPredict = Number(args['num-predict'] || 2600);
 const runs = Number(args.runs || 1);
